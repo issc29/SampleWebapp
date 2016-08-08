@@ -1,33 +1,57 @@
-node('jdk8') {
 
-	stage 'build'
-		env.PATH="${tool 'maven-3.3.9'}/bin:${env.PATH}"
-		checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[url: 'https://github.com/issc29/SampleWebapp']]])
-		sh 'mvn clean package'
-		archive 'target/*.war'
 
-	stage 'integration-test'
-		sh 'mvn verify'
-		step([$class: 'JUnitResultArchiver', testResults: '**/target/surefire-reports/TEST-*.xml', healthScaleFactor: 1.0])
+stage 'build'
+	node('docker-cloud') {
+	checkout scm
+	docker.image('kmadel/maven:3.3.3-jdk-8').inside('-v /data:/data') {
+			sh 'mvn -Dmaven.repo.local=/data/mvn/repo clean package'
+	}
+	stash name: 'pom', includes: 'pom.xml, src, target'
 }
 
-stage 'quality-and-functional-test'
 
-	parallel(qualityTest: {
-    	node('jdk8') {
-    		echo 'sonar scan'
-        	// sh 'mvn sonar:sonar'
-    	}
-    }, functionalTest: {
-    	echo 'selenium test'
-        // build 'sauce-labs-test'
-    })
+checkpoint 'Build Complete'
+stage 'Quality Analysis'
+	node('docker-cloud') {
+		try {
+			unstash 'pom'
 
-    try {
-        checkpoint('Testing Complete')
-    } catch (NoSuchMethodError _) {
-        echo 'Checkpoint feature available in Jenkins Enterprise by CloudBees.'
-    }
+			docker.image('kmadel/maven:3.3.3-jdk-8').inside('-v /data:/data') {
+			              sh 'mvn -Dmaven.repo.local=/data/mvn/repo verify'
+			          }
+			//step([$class: 'JUnitResultArchiver', testResults: '**/target/surefire-reports/TEST-*.xml', healthScaleFactor: 1.0])
+		} catch (x) {
+		  currentBuild.result = "failed"
+		  throw x
+		}
+	}
+
+
+
+checkpoint 'Quality Analysis Complete'
+
+
+docker.withServer('tcp://52.27.249.236:3376', 'beedemo-swarm-cert'){
+	stage 'Build Docker Image'
+		node('docker-cloud') {
+			unstash 'pom'
+			def sampleWebAppImage
+			dir('target') {
+					sampleWebAppImage = docker.build "issc29/sampleWebApp:1.0"
+			}
+		}
+
+	stage 'Deploy'
+	      try{
+	        sh "docker stop beedemo-swarm-master/sampleWebApp"
+	        sh "docker rm beedemo-swarm-master/sampleWebApp"
+	      } catch (Exception _) {
+	         echo "no container to stop"
+	      }
+
+				container = sampleWebAppImage.run("--name sampleWebApp -p 1234:1234")
+
+}
 
 
 stage 'approval'
